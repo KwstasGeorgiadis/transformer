@@ -46,7 +46,6 @@ kernel void gpu_batched_matmul(
     uint batch = batch_head / num_heads;
     uint head = batch_head % num_heads;
     
-    // Offsets into the 4D tensors
     uint a_offset = batch * num_heads * M * K + head * M * K;
     uint b_offset = batch * num_heads * K * N + head * K * N;
     uint out_offset = batch * num_heads * M * N + head * M * N;
@@ -62,7 +61,7 @@ kernel void gpu_batched_matmul(
 // Transpose Operations
 // ============================================
 
-kernel void transpose_2d(
+kernel void gpu_transpose_2d(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
     constant uint& M [[buffer(2)]],
@@ -84,13 +83,12 @@ kernel void gpu_transpose_4d(
     constant uint& d1 [[buffer(3)]],
     constant uint& d2 [[buffer(4)]],
     constant uint& d3 [[buffer(5)]],
-    constant uint& mode [[buffer(6)]],  // 0 = swap(1,2), 1 = swap(2,3)
+    constant uint& mode [[buffer(6)]],
     uint id [[thread_position_in_grid]])
 {
     uint total = d0 * d1 * d2 * d3;
     if (id >= total) return;
     
-    // Decode input index to 4D coordinates
     uint i0 = id / (d1 * d2 * d3);
     uint rem = id % (d1 * d2 * d3);
     uint i1 = rem / (d2 * d3);
@@ -100,10 +98,8 @@ kernel void gpu_transpose_4d(
     
     uint out_idx;
     if (mode == 0) {
-        // swap dims 1 and 2: (d0, d1, d2, d3) -> (d0, d2, d1, d3)
         out_idx = i0 * (d2 * d1 * d3) + i2 * (d1 * d3) + i1 * d3 + i3;
     } else {
-        // swap dims 2 and 3: (d0, d1, d2, d3) -> (d0, d1, d3, d2)
         out_idx = i0 * (d1 * d3 * d2) + i1 * (d3 * d2) + i3 * d2 + i2;
     }
     
@@ -152,32 +148,6 @@ kernel void gpu_relu_backward(
     grad_in[id] = input[id] > 0.0f ? grad_out[id] : 0.0f;
 }
 
-kernel void gpu_gelu(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    uint id [[thread_position_in_grid]])
-{
-    float x = input[id];
-    // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    float cdf = 0.5f * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x)));
-    output[id] = x * cdf;
-}
-
-kernel void gpu_gelu_backward(
-    device const float* input [[buffer(0)]],
-    device const float* grad_out [[buffer(1)]],
-    device float* grad_in [[buffer(2)]],
-    uint id [[thread_position_in_grid]])
-{
-    float x = input[id];
-    float x3 = x * x * x;
-    float inner = 0.7978845608f * (x + 0.044715f * x3);
-    float tanh_inner = tanh(inner);
-    float cdf = 0.5f * (1.0f + tanh_inner);
-    float pdf = 0.5f * 0.7978845608f * (1.0f + 0.134145f * x * x) * (1.0f - tanh_inner * tanh_inner);
-    grad_in[id] = grad_out[id] * (cdf + x * pdf);
-}
-
 // ============================================
 // Softmax
 // ============================================
@@ -193,19 +163,16 @@ kernel void gpu_softmax(
     
     uint offset = id * cols;
     
-    // Find max for numerical stability
     float max_val = input[offset];
     for (uint i = 1; i < cols; i++) {
         max_val = max(max_val, input[offset + i]);
     }
     
-    // Compute exp and sum
     float sum = 0.0f;
     for (uint i = 0; i < cols; i++) {
         sum += exp(input[offset + i] - max_val);
     }
     
-    // Normalize
     for (uint i = 0; i < cols; i++) {
         output[offset + i] = exp(input[offset + i] - max_val) / sum;
     }
@@ -228,28 +195,25 @@ kernel void gpu_softmax_4d(
     
     uint base = batch * num_heads * seq1 * seq2 + head * seq1 * seq2 + row * seq2;
     
-    // Find max
     float max_val = input[base];
     for (uint i = 1; i < seq2; i++) {
         max_val = max(max_val, input[base + i]);
     }
     
-    // Compute exp and sum
     float sum = 0.0f;
     for (uint i = 0; i < seq2; i++) {
         sum += exp(input[base + i] - max_val);
     }
     
-    // Normalize
     for (uint i = 0; i < seq2; i++) {
         output[base + i] = exp(input[base + i] - max_val) / sum;
     }
 }
 
 kernel void gpu_softmax_backward_4d(
-    device const float* softmax_out [[buffer(0)]],  // attW
-    device const float* grad_out [[buffer(1)]],      // dattW
-    device float* grad_in [[buffer(2)]],             // d_scores
+    device const float* softmax_out [[buffer(0)]],
+    device const float* grad_out [[buffer(1)]],
+    device float* grad_in [[buffer(2)]],
     constant uint& d0 [[buffer(3)]],
     constant uint& d1 [[buffer(4)]],
     constant uint& d2 [[buffer(5)]],
@@ -264,13 +228,11 @@ kernel void gpu_softmax_backward_4d(
     
     uint base = batch_head * d2 * d3 + row * d3;
     
-    // Compute dot product: sum(grad_out * softmax_out) along last dim
     float dot_sum = 0.0f;
     for (uint i = 0; i < d3; i++) {
         dot_sum += grad_out[base + i] * softmax_out[base + i];
     }
     
-    // grad_in = softmax_out * (grad_out - dot_sum)
     uint idx = base + col;
     grad_in[idx] = softmax_out[idx] * (grad_out[idx] - dot_sum);
 }
@@ -295,14 +257,12 @@ kernel void gpu_layer_norm_forward(
     
     uint offset = id * cols;
     
-    // Compute mean
     float mean = 0.0f;
     for (uint i = 0; i < cols; i++) {
         mean += input[offset + i];
     }
     mean /= float(cols);
     
-    // Compute variance
     float var = 0.0f;
     for (uint i = 0; i < cols; i++) {
         float diff = input[offset + i] - mean;
@@ -311,7 +271,6 @@ kernel void gpu_layer_norm_forward(
     var /= float(cols);
     variance[id] = var;
     
-    // Normalize and apply gamma/beta
     float inv_std = 1.0f / sqrt(var + eps);
     for (uint i = 0; i < cols; i++) {
         float norm = (input[offset + i] - mean) * inv_std;
@@ -335,10 +294,23 @@ kernel void gpu_layer_norm_backward_dx(
     
     uint offset = id * cols;
     float inv_std = 1.0f / sqrt(variance[id] + eps);
+    float N_f = float(cols);
     
-    // Simplified backward: dx = dout * gamma / sqrt(var + eps)
+    // Full layer norm backward:
+    // dx_i = (1/std) * (1/N) * (N * dy_hat_i - sum(dy_hat) - x_norm_i * sum(dy_hat * x_norm))
+    // where dy_hat_i = grad_out_i * gamma_i
+    
+    float sum_dy_hat = 0.0f;
+    float sum_dy_hat_xn = 0.0f;
     for (uint i = 0; i < cols; i++) {
-        grad_in[offset + i] = grad_out[offset + i] * gamma[i] * inv_std;
+        float dy_hat = grad_out[offset + i] * gamma[i];
+        sum_dy_hat += dy_hat;
+        sum_dy_hat_xn += dy_hat * x_norm[offset + i];
+    }
+    
+    for (uint i = 0; i < cols; i++) {
+        float dy_hat = grad_out[offset + i] * gamma[i];
+        grad_in[offset + i] = inv_std * (dy_hat - sum_dy_hat / N_f - x_norm[offset + i] * sum_dy_hat_xn / N_f);
     }
 }
 
@@ -522,7 +494,7 @@ kernel void gpu_add_mask(
     if (col >= seq2 || row >= seq1 || batch_head >= batch * heads) return;
     
     uint score_idx = batch_head * seq1 * seq2 + row * seq2 + col;
-    uint mask_idx = row * seq2 + col;  // Mask is (seq1, seq2), broadcast across batch/heads
+    uint mask_idx = row * seq2 + col;
     
     scores[score_idx] += mask[mask_idx];
 }
@@ -589,10 +561,24 @@ kernel void gpu_scatter_add(
     uint out_idx = token_idx * embed_dim + col;
     uint update_idx = row * embed_dim + col;
     
-    // Atomic add for thread safety
-    atomic_fetch_add_explicit((device atomic_float*)&output[out_idx], 
-                              updates[update_idx], 
-                              memory_order_relaxed);
+    // CAS loop for float atomic add (Metal doesn't have atomic_float)
+    device atomic_uint* addr = (device atomic_uint*)&output[out_idx];
+    float val = updates[update_idx];
+    uint expected = atomic_load_explicit(addr, memory_order_relaxed);
+    uint desired;
+    do {
+        float current = as_type<float>(expected);
+        desired = as_type<uint>(current + val);
+    } while (!atomic_compare_exchange_weak_explicit(addr, &expected, desired,
+              memory_order_relaxed, memory_order_relaxed));
+}
+
+// Zero a buffer
+kernel void gpu_zero_buffer(
+    device float* buf [[buffer(0)]],
+    uint id [[thread_position_in_grid]])
+{
+    buf[id] = 0.0f;
 }
 
 // ============================================
@@ -608,68 +594,98 @@ kernel void gpu_adam_update(
     constant float& beta1 [[buffer(5)]],
     constant float& beta2 [[buffer(6)]],
     constant float& epsilon [[buffer(7)]],
-    constant float& beta1_t [[buffer(8)]],  // beta1^t
-    constant float& beta2_t [[buffer(9)]],  // beta2^t
+    constant float& beta1_t [[buffer(8)]],
+    constant float& beta2_t [[buffer(9)]],
     uint id [[thread_position_in_grid]])
 {
     float g = grad[id];
     
-    // Update biased first moment estimate
     float m_new = beta1 * m[id] + (1.0f - beta1) * g;
     m[id] = m_new;
     
-    // Update biased second raw moment estimate
     float v_new = beta2 * v[id] + (1.0f - beta2) * g * g;
     v[id] = v_new;
     
-    // Compute bias-corrected estimates
     float m_hat = m_new / (1.0f - beta1_t);
     float v_hat = v_new / (1.0f - beta2_t);
     
-    // Update parameters
     param[id] -= lr * m_hat / (sqrt(v_hat) + epsilon);
 }
 
-// ============================================
-// Gradient Clipping
-// ============================================
-
-kernel void gpu_compute_grad_norm_sq(
-    device const float* grad [[buffer(0)]],
-    device float* partial_sums [[buffer(1)]],
-    constant uint& size [[buffer(2)]],
-    uint id [[thread_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]],
-    uint tg_size [[threads_per_threadgroup]])
+// Extract last token from 3D: (batch, seq, dim) -> (batch, dim)
+kernel void gpu_extract_last_token(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& batch [[buffer(2)]],
+    constant uint& seq [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
 {
-    threadgroup float shared_mem[256];
+    uint col = gid.x;
+    uint b = gid.y;
     
-    float sum = 0.0f;
-    for (uint i = id; i < size; i += tg_size * 256) {
-        float val = grad[i];
-        sum += val * val;
-    }
+    if (col >= dim || b >= batch) return;
     
-    shared_mem[tid] = sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    output[b * dim + col] = input[b * seq * dim + (seq - 1) * dim + col];
+}
+
+// Expand last token grad back to 3D (zeros elsewhere)
+kernel void gpu_expand_last_token(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& batch [[buffer(2)]],
+    constant uint& seq [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    uint col = gid.x;
+    uint s = gid.y;
+    uint b = gid.z;
     
-    // Reduction within threadgroup
-    for (uint s = tg_size / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            shared_mem[tid] += shared_mem[tid + s];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
+    if (col >= dim || s >= seq || b >= batch) return;
     
-    if (tid == 0) {
-        partial_sums[id / tg_size] = shared_mem[0];
+    uint idx = b * seq * dim + s * dim + col;
+    if (s == seq - 1) {
+        output[idx] = input[b * dim + col];
+    } else {
+        output[idx] = 0.0f;
     }
 }
 
-kernel void gpu_clip_gradient(
-    device float* grad [[buffer(0)]],
-    constant float& scale [[buffer(1)]],
+// Compute mean of losses buffer -> single float
+kernel void gpu_mean_reduce(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
     uint id [[thread_position_in_grid]])
 {
-    grad[id] *= scale;
+    if (id != 0) return;
+    float sum = 0.0f;
+    for (uint i = 0; i < count; i++) {
+        sum += input[i];
+    }
+    output[0] = sum / float(count);
+}
+
+// Argmax per row for accuracy
+kernel void gpu_argmax_accuracy(
+    device const float* probs [[buffer(0)]],
+    device const uint* labels [[buffer(1)]],
+    device float* correct [[buffer(2)]],
+    constant uint& batch_size [[buffer(3)]],
+    constant uint& num_classes [[buffer(4)]],
+    uint id [[thread_position_in_grid]])
+{
+    if (id >= batch_size) return;
+    
+    uint offset = id * num_classes;
+    float max_val = probs[offset];
+    uint max_idx = 0;
+    for (uint i = 1; i < num_classes; i++) {
+        if (probs[offset + i] > max_val) {
+            max_val = probs[offset + i];
+            max_idx = i;
+        }
+    }
+    correct[id] = (max_idx == labels[id]) ? 1.0f : 0.0f;
 }
