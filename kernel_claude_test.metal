@@ -148,6 +148,31 @@ kernel void gpu_relu_backward(
     grad_in[id] = input[id] > 0.0f ? grad_out[id] : 0.0f;
 }
 
+kernel void gpu_gelu(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float cdf = 0.5f * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x)));
+    output[id] = x * cdf;
+}
+
+kernel void gpu_gelu_backward(
+    device const float* input [[buffer(0)]],
+    device const float* grad_out [[buffer(1)]],
+    device float* grad_in [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float x3 = x * x * x;
+    float inner = 0.7978845608f * (x + 0.044715f * x3);
+    float tanh_inner = tanh(inner);
+    float cdf = 0.5f * (1.0f + tanh_inner);
+    float pdf = 0.5f * 0.7978845608f * (1.0f + 0.134145f * x * x) * (1.0f - tanh_inner * tanh_inner);
+    grad_in[id] = grad_out[id] * (cdf + x * pdf);
+}
+
 // ============================================
 // Softmax
 // ============================================
